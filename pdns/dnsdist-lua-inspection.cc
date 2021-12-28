@@ -94,6 +94,105 @@ static std::vector<std::pair<int, vector<boost::variant<string,double>>>> getGen
 
 #ifndef DISABLE_DEPRECATED_DYNBLOCK
 
+static std::unordered_map<unsigned int, vector<boost::variant<string,double>>> getEkkelResponses(unsigned int top, boost::optional<int> labels, std::function<bool(const Rings::Response&)> pred)
+{
+  setLuaNoSideEffect();
+
+  vector<string> matchedTlds;
+
+  matchedTlds.push_back("co.uk.");
+  matchedTlds.push_back("cn.com.");
+  matchedTlds.push_back("co.in.");
+  matchedTlds.push_back("com.ar.");
+  matchedTlds.push_back("com.au.");
+  matchedTlds.push_back("com.br.");
+  matchedTlds.push_back("com.cn.");
+  matchedTlds.push_back("com.co.");
+  matchedTlds.push_back("com.cy.");
+  matchedTlds.push_back("com.es.");
+  matchedTlds.push_back("com.hk.");
+  matchedTlds.push_back("com.mt.");
+  matchedTlds.push_back("com.tw.");
+  matchedTlds.push_back("co.nl."); 
+  matchedTlds.push_back("co.nz.");
+  matchedTlds.push_back("co.uk.");
+  matchedTlds.push_back("co.za.");
+  matchedTlds.push_back("de.ls.");
+  matchedTlds.push_back("info.pl.");
+  matchedTlds.push_back("net.cn.");
+  matchedTlds.push_back("org.cn.");
+  matchedTlds.push_back("org.uk.");
+   
+  map<DNSName, unsigned int> counts;
+  unsigned int total=0;
+  {
+    for (const auto& shard : g_rings.d_shards) {
+      auto rl = shard->respRing.lock();
+      if (!labels) {
+        for(const auto& a : *rl) {
+          if(!pred(a))
+            continue;
+          counts[a.name]++;
+          total++;
+        }
+      }
+      else {
+        unsigned int lab = *labels;
+        for(const auto& a : *rl) {
+          if(!pred(a))
+            continue;
+
+          DNSName temp(a.name);
+          bool filterTLD = false;
+          for(std::vector<string>::iterator it = matchedTlds.begin(); it != matchedTlds.end(); ++it) {            
+             DNSName tld(a.name);
+             tld.trimToLabels(2);
+              if(strcmp(tld.toString().c_str(),(*it).c_str()) == 0) {
+               temp.trimToLabels(3);
+               filterTLD = true;
+             }
+          }
+
+          if(!filterTLD) {
+             temp.trimToLabels(lab);
+          }
+          counts[temp]++;
+          total++;
+        }
+      }
+    }
+  }
+  //      cout<<"Looked at "<<total<<" responses, "<<counts.size()<<" different ones"<<endl;
+  vector<pair<unsigned int, DNSName>> rcounts;
+  rcounts.reserve(counts.size());
+  for(const auto& c : counts)
+    rcounts.emplace_back(c.second, c.first.makeLowerCase());
+
+  sort(rcounts.begin(), rcounts.end(), [](const decltype(rcounts)::value_type& a,
+                                          const decltype(rcounts)::value_type& b) {
+         return b.first < a.first;
+       });
+
+  std::unordered_map<unsigned int, vector<boost::variant<string,double>>> ret;
+  unsigned int count=1, rest=0;
+  for(const auto& rc : rcounts) {
+    if(count==top+1)
+      rest+=rc.first;
+    else
+      ret.insert({count++, {rc.second.toString(), rc.first, 100.0*rc.first/total}});
+  }
+
+  if (total > 0) {
+    ret.insert({count, {"Rest", rest, 100.0*rest/total}});
+  }
+  else {
+    ret.insert({count, {"Rest", rest, 100.0 }});
+  }
+
+  return ret;
+}
+
+
 typedef std::unordered_map<ComboAddress, unsigned int, ComboAddress::addressOnlyHash, ComboAddress::addressOnlyEqual> counts_t;
 
 static counts_t filterScore(const counts_t& counts,
@@ -295,6 +394,7 @@ void setupLuaInspection(LuaContext& luaCtx)
         for (const auto& shard : g_rings.d_shards) {
           auto rl = shard->queryRing.lock();
           for(auto a : *rl) {
+
             a.name.trimToLabels(lab);
             counts[a.name]++;
             total++;
@@ -365,7 +465,14 @@ void setupLuaInspection(LuaContext& luaCtx)
       return getGenResponses(top, labels, [kind](const Rings::Response& r) { return r.dh.rcode == kind; });
     });
 
+
+  luaCtx.writeFunction("getEkkelResponses", [](unsigned int top, unsigned int kind, boost::optional<int> labels) {
+      return getEkkelResponses(top, labels, [kind](const Rings::Response& r) { return r.dh.rcode == kind; });
+    });
+
+
   luaCtx.executeCode(R"(function topResponses(top, kind, labels) top = top or 10; kind = kind or 0; for k,v in ipairs(getTopResponses(top, kind, labels)) do show(string.format("%4d  %-40s %4d %4.1f%%",k,v[1],v[2],v[3])) end end)");
+  luaCtx.executeCode(R"(function ekkelResponses(top, kind, labels) top = top or 10; kind = kind or 0; for k,v in ipairs(getEkkelResponses(top, kind, labels)) do show(string.format("%4d  %-40s %4d %4.1f%%",k,v[1],v[2],v[3])) end end)");
 
 
   luaCtx.writeFunction("getSlowResponses", [](uint64_t top, uint64_t msec, boost::optional<int> labels) {
